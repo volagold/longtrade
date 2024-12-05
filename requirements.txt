@@ -1,0 +1,4 @@
+holidays
+pandas
+fastapi
+longport
