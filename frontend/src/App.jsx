@@ -57,7 +57,7 @@ const factors_templ = [
   {
       'cls': '⚪️',
       'value': 'neutral',
-      'title': 'mood'
+      'title': 'iv'
   },
 ]
 
@@ -93,7 +93,7 @@ function App() {
   const [showOrder, setShowOrder] = useState(false) // display order?
   const [left, setLeft] = useState(true) // place orderCard at left?
 
-  const theme = !dark? 'cupcake' : 'forest';
+  const theme = !dark? 'cupcake' : 'dim';
   document.querySelector('html').setAttribute('data-theme', theme);
 
   const get_capflow = async (ticket) => {
@@ -405,7 +405,7 @@ function App() {
     animate={{ opacity: 1 }}
     exit={{ opacity: 0}}
     transition={{ duration: 1.2, ease: 'easeInOut' }}
-    className='grid grid-cols-8 2xl:grid-cols-9 gap-4 px-2'>
+    className='grid grid-cols-8 3xl:grid-cols-9 gap-4 px-2'>
     {board.map((item, idx) => {
       return (
         <div key={idx} className='relative indicator cursor-pointer' onClick={() => {setIdx(idx); handleTkClick(item.tk)}}>
@@ -564,7 +564,10 @@ function StockBoard({data, dark}){
       </div>
 
       {/* 第二行 second row */}
-      <div className='font-bold text-xl ml-1'>{data.p}</div>
+      <div className='flex flex-row gap-2 ml-1'>
+      <div className={`font-bold ${dark? 'text-gray-200': 'text-black'} text-xl`}>${data.full_price.toFixed(2)}</div>  
+      <div className={`font-bold text-xl ml-1 ${data.p > 0 ? 'text-green-600' : 'text-red-600'}`}>{data.p>0? '+' : null}{data.p}</div>
+      </div>
     </motion.div>
   )
 
@@ -895,7 +898,7 @@ function OrderCard({order, setshow}){
   )
 }
 
-function TradeButton({text='close', tk='', callback=null, type='close', disabled=false}) {
+function TradeButton({text='sell', tk='', callback=null, type='close', disabled=false}) {
   return (
     <button
     className={`relative border-4 ${type=='open'? 

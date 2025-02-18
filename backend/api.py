@@ -81,6 +81,7 @@ app.add_middleware(
 # ------------------------
 # in-memory db
 memory = 50
+global quotes_origin; quotes_origin = {tk: Decimal('0.0') for tk in tks}
 global quotes; quotes = {tk: deque([Decimal('0.0')]*memory) for tk in tks}
 global vol; vol = {tk: [Decimal('0'), Decimal('0')] for tk in tks}
 global resist; resist = {tk: Decimal('0.0') for tk in tks}
@@ -89,6 +90,8 @@ global mm; mm = {tk: {'max': False, 'min': False} for tk in tks}
 
 def handle_quote(ticket: str, event: PushQuote):
     tk = rfmt(ticket)
+    quotes_origin[tk] = event.last_done
+
     p = quotes[tk]
     new = event.last_done - yes[tk]  # use Decimal
     new = round(new, 3)
@@ -100,7 +103,7 @@ def handle_quote(ticket: str, event: PushQuote):
     mm[tk]['max'] = new > max(p)
     mm[tk]['min'] = new < min(p)
 
-    p.append(new)
+    p.append(new)  # 
     p.popleft()
 
     diff[tk] = round((p[-1]+p[-2]+p[-3]) / Decimal('3.0') - (p[0]+p[1]+p[2]) / Decimal('3.0'), 2)
@@ -127,6 +130,7 @@ async def quote_stock(websocket: WebSocket):
                 "data" : [
                     {
                     "tk": tk,
+                    "full_price": quotes_origin[tk],
                     "p": quotes[tk][-1], 
                     "r": resist[tk],
                     "vol": vol[tk][1] - vol[tk][0],
@@ -135,7 +139,7 @@ async def quote_stock(websocket: WebSocket):
                     }  
                     for tk in tks]
             })
-            await asyncio.sleep(0.25)
+            await asyncio.sleep(0.2)
             
     except WebSocketDisconnect:
         q.unsubscribe([fmt(t) for t in tks], [SubType.Quote])
@@ -257,18 +261,18 @@ def get_iv(tk: str):
     puts = [f'{round(i*100, 1)}%' for i in data['puts']]
     calls = [f'{round(i*100, 1)}%' for i in data['calls']]
 
-    head = [{'cls': cls, 'val': 'Put   －S－   Call'}]
-    supp = head + [
-        {'cls': cls,
-        'val': f'{puts[i]} －{data['strikes'][i]}－ {calls[i]}' 
-        }
-        for i in range(len(puts))
-    ]
+    # head = [{'cls': cls, 'val': 'Put   －S－   Call'}]
+    # supp = head + [
+    #     {'cls': cls,
+    #     'val': f'{puts[i]} －{data['strikes'][i]}－ {calls[i]}' 
+    #     }
+    #     for i in range(len(puts))
+    # ]
 
     res = {   
             'cls': cls,
             'value': f'{round(data['iv']*100, 1)}% / {round(data['hv']*100, 1)}%',
-            'supp': supp,
+            # 'supp': supp,
             'timestamp': data['timestamp'],
             'title': 'IV'
          }
@@ -341,6 +345,11 @@ def get_factors(tk):
             'supp': closes,
             'title': 'prev.'
         },
+        # {   
+        #     'cls': '⚪️', 
+        #     'value': 'neutral', 
+        #     'title': 'iv'
+        #  },
     ]
 
     data.append(get_iv(tk))
@@ -357,25 +366,26 @@ class Order(BaseModel):
     money: str = 'itm'  # itm | otm
 
 global ostack; ostack = {tk: {'put':[], 'call':[]} for tk in tks}
-unclosed = tr.stock_positions().channels[0].positions  # 持仓
-if unclosed:
-    for pos in unclosed:
+positions = tr.stock_positions().channels[0].positions  # 持仓
+if positions:
+    for pos in positions:
         # option name to tk
-        split = pos.symbol_name.split(' ')
-        tk, option = split[0].lower(), split[-1].lower()
-        data = {
-                'id': f'HIST-{pos.symbol}',
-                'success': True,
-                'symbol': pos.symbol, 
-                'option': option,
-                'status': 'filled',
-                'side': 'buy',
-                'tk': tk,
-                'qty': pos.quantity,
-                'exec_price': pos.cost_price,  # Decimal
-                }
-        if tk in tks:
-            ostack[tk][option].append(data)
+        split = pos.symbol_name.lower().split(' ')
+        if split[-1] in {'call', 'put'}:  # skip possible stock holdings
+            tk, option = split[0], split[-1]
+            data = {
+                    'id': f'HIST-{pos.symbol}',
+                    'success': True,
+                    'symbol': pos.symbol, 
+                    'option': option,
+                    'status': 'filled',
+                    'side': 'buy',
+                    'tk': tk,
+                    'qty': pos.quantity,
+                    'exec_price': pos.cost_price,  # Decimal
+                    }
+            if tk in tks:
+                ostack[tk][option].append(data)
 
 @app.get('/position/')
 def get_position(tk):
