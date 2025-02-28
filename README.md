@@ -24,7 +24,7 @@ to start backend service, open a separate terminal window and run
 ```
 to start frontend service. Then go to `http://localhost:5173/` to use the application.
 
-## demo
-![](/demo.mp4)
+## Demo
+![](/demo.gif)
 
 
