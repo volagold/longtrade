@@ -26,5 +26,3 @@ to start frontend service. Then go to `http://localhost:5173/` to use the applic
 
 ## Demo
 ![](/demo.gif)
-
-
