@@ -4,8 +4,8 @@ goog
 amzn
 meta
 msft
+pltr
 nflx
-uber
 nvda
 arm
 avgo
@@ -16,8 +16,3 @@ amd
 asml
 qqq
 spy
-tem
-net
-crwd
-pltr
-hood
