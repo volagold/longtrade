@@ -93,7 +93,7 @@ function App() {
   const [showOrder, setShowOrder] = useState(false) // display order?
   const [left, setLeft] = useState(true) // place orderCard at left?
 
-  const theme = !dark? 'cupcake' : 'dim';
+  const theme = !dark? 'cupcake' : 'forest';  // dim
   document.querySelector('html').setAttribute('data-theme', theme);
 
   const get_capflow = async (ticket) => {
