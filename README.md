@@ -1,11 +1,15 @@
 # longtrade
 
-longtrade is a full-stack option trading system based on the [longport API](https://open.longportapp.com/en/) provided by [Longbridge Securities](https://longbridge.com).
+![](/dark.png)
+![](/light.png)
+
+longtrade is an option trading system based on the [longport API](https://open.longportapp.com/en/) provided by [Longbridge Securities](https://longbridge.com).
 
 ## Features
 - simple and efficient
 - real-time price quotes
-- automatically placing orders
+- Black-Scholes pricing calculator
+- quick order placing
 
 ## How to use
 1. Open up a margin account at [longbridge.com](https://longbridge.com).
@@ -23,6 +27,3 @@ to start backend service, open a separate terminal window and run
 ./app.sh
 ```
 to start frontend service. Then go to `http://localhost:5173/` to use the application.
-
-## Demo
-![](/demo.gif)

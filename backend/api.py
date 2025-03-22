@@ -1,30 +1,28 @@
-import os
-import json
-import pytz
-import datetime
-import holidays
-import uvicorn
-import asyncio
+import os, re, json, math, pytz
+import datetime, holidays
+import uvicorn, asyncio
 from collections import deque
 from decimal import Decimal
-import pandas as pd
+import scipy.stats as stats
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from longport.openapi import QuoteContext, TradeContext, Config, SubType, PushQuote, OrderType, OrderSide, OrderStatus, StrikePriceInfo, TimeInForceType, Period, AdjustType, OpenApiException
-
+from longport.openapi import QuoteContext, TradeContext, Config, SubType, PushQuote, PushDepth, OrderType, OrderSide, OrderStatus, StrikePriceInfo, TimeInForceType, Period, AdjustType, OpenApiException
 
 print('\nStarting longtrade backend service...\n')
 
 holidays = holidays.NYSE()
 eastern = pytz.timezone('US/Eastern')
-open_time=datetime.time(9, 30)
+open_time=datetime.time(9, 0)
 close_time=datetime.time(16, 0)
+year = str(datetime.datetime.now(eastern).year)
 
-def is_trading_now():
+def is_trading():
     today = datetime.datetime.now(eastern)
     now = today.time()
     return (today.weekday() < 5) and (today not in holidays) and (open_time <= now <= close_time)
+
+trading = is_trading()
 # --------------------
 # longport
 # --------------------
@@ -48,13 +46,13 @@ def fmt(tk):
 def rfmt(ticket):
     return ticket[:-3].lower()
 
-def get_opt_type(symbol):
-    for char in symbol[::-1]:
-        if char == 'C': return 'Call'
-        if char == 'P': return 'Put'
+# def get_opt_type(symbol):
+#     for char in symbol[::-1]:
+#         if char == 'C': return 'Call'
+#         if char == 'P': return 'Put'
 
 last_quote = q.quote([fmt(tk) for tk in tks])
-if not is_trading_now():
+if not trading:
     yes = {
         rfmt(x.symbol): x.last_done # => prevClose when trading starts
         for x in last_quote
@@ -77,64 +75,87 @@ app.add_middleware(
     allow_headers=["*"],
 )
 # ------------------------
+# in-memory storage
+# ------------------------
+memory = 50
+full_price = {tk: Decimal('0.0') for tk in tks}
+quotes = {tk: deque([Decimal('0.0')]*memory) for tk in tks}
+vol = {tk: [Decimal('0'), Decimal('0')] for tk in tks}
+resist = {tk: Decimal('0.0') for tk in tks}
+mm = {tk: {'max': False, 'min': False} for tk in tks}
+depth = {'bid':{'p':0, 'q':0}, 'ask': {'p': 0, 'q':0} }
+# cache
+explist = {tk:[] for tk in tks}
+chain = {tk: {'put':dict(), 'call':dict()} for tk in tks}
+ref = {id: tuple(), 'symidx': dict()}  # last strike table requested
+positions = {'val': []}
+# ------------------------
 # real time quote
 # ------------------------
-# in-memory db
-memory = 50
-global quotes_origin; quotes_origin = {tk: Decimal('0.0') for tk in tks}
-global quotes; quotes = {tk: deque([Decimal('0.0')]*memory) for tk in tks}
-global vol; vol = {tk: [Decimal('0'), Decimal('0')] for tk in tks}
-global resist; resist = {tk: Decimal('0.0') for tk in tks}
-global diff; diff = {tk: Decimal('0.0') for tk in tks}
-global mm; mm = {tk: {'max': False, 'min': False} for tk in tks}
-
 def handle_quote(ticket: str, event: PushQuote):
-    tk = rfmt(ticket)
-    quotes_origin[tk] = event.last_done
+    if len(ticket) > 10:  # options
+        tk, type, eidx= ref['id']
+        idx = ref['symidx'][ticket]
+        data = chain[tk][type][eidx][idx]
+        data['p'] = event.last_done
+        data['ch'] = event.last_done - data['prev']
+        data['min'] = event.low
+        data['max'] = event.high
+        data['vol'] = event.volume
+    else:  # stocks
+        tk = rfmt(ticket)
+        full_price[tk] = event.last_done
 
-    p = quotes[tk]
-    new = event.last_done - yes[tk]  # use Decimal
-    new = round(new, 3)
-    d1, d2 = new - p[-1], p[-1] - p[-2]
- 
-    vol[tk][0] = vol[tk][1]
-    vol[tk][1] = event.volume
+        p = quotes[tk]
+        new = event.last_done - yes[tk]  # use Decimal
+        new = round(new, 3)
+        d1, d2 = new - p[-1], p[-1] - p[-2]
     
-    mm[tk]['max'] = new > max(p)
-    mm[tk]['min'] = new < min(p)
+        vol[tk][0] = vol[tk][1]
+        vol[tk][1] = event.volume
+        
+        mm[tk]['max'] = new > max(p)
+        mm[tk]['min'] = new < min(p)
 
-    p.append(new)  # 
-    p.popleft()
+        p.append(new)
+        p.popleft()
 
-    diff[tk] = round((p[-1]+p[-2]+p[-3]) / Decimal('3.0') - (p[0]+p[1]+p[2]) / Decimal('3.0'), 2)
+        # resist
+        if d1 * d2 <= Decimal('0'):
+            resist[tk]  = resist[tk] + abs(d1)
+            resist[tk] = min(resist[tk], Decimal('30.0'))
+        else:
+            a = Decimal('2.0')
+            resist[tk] =  resist[tk] * a / (abs(d1) + a)
 
-    # calculate resist
-    if d1 * d2 <= Decimal('0'):
-        resist[tk]  = resist[tk] + abs(d1)
-        resist[tk] = min(resist[tk], Decimal('30.0'))
-    else:
-        a = Decimal('2.0')
-        resist[tk] =  resist[tk] * a / (abs(d1) + a)
+def handle_depth(symbol: str, event: PushDepth):
+    """option depth"""
+    depth['bid']['p'] = event.bids[0].price
+    depth['bid']['q'] = event.bids[0].volume
+    depth['ask']['p'] = event.asks[0].price
+    depth['ask']['q'] = event.asks[0].volume
+
+q.set_on_quote(handle_quote)
+q.set_on_depth(handle_depth)
+# APP250314P230000.US PushDepth { asks: [Depth { position: 1, price: 4.50, volume: 1, order_num: 0 }], bids: [Depth { position: 1, price: 3.00, volume: 186, order_num: 0 }] }
+# APP250321P230000.US PushQuote { last_done: 3.90, open: 6.50, high: 8.80, low: 3.50, timestamp: "2025-03-07T21:00:00Z", volume: 1039, turnover: 537022.00, trade_status: Normal, trade_session: Normal }
 
 @app.websocket("/quote")
 async def quote_stock(websocket: WebSocket):
     await websocket.accept()
-    q.set_on_quote(handle_quote)
+    # q.set_on_quote(handle_quote)
     q.subscribe([fmt(t) for t in tks], [SubType.Quote], is_first_push=True)
     print('subscribed to all tickets')
     try:
-        msg = await websocket.receive_text()
-        print(msg)
         while True:
             await websocket.send_json({
                 "data" : [
                     {
                     "tk": tk,
-                    "full_price": quotes_origin[tk],
+                    "full_price": full_price[tk],
                     "p": quotes[tk][-1], 
                     "r": resist[tk],
                     "vol": vol[tk][1] - vol[tk][0],
-                    "diff": diff[tk],
                     "mm": mm[tk]
                     }  
                     for tk in tks]
@@ -143,33 +164,44 @@ async def quote_stock(websocket: WebSocket):
             
     except WebSocketDisconnect:
         q.unsubscribe([fmt(t) for t in tks], [SubType.Quote])
-        print('unsubscribed from all tickets')
+        print('unsub. from all tks')
 
-@app.websocket("/quote-option")
-async def quote_option(websocket: WebSocket):
+@app.websocket("/quote-strikes")
+async def quote_strikes(websocket: WebSocket):
     await websocket.accept()
-    symbol = await websocket.receive_text()
-    option_type = get_opt_type(symbol)
+    tk, type, eidx= ref['id']
+    symlist = list(ref['symidx'].keys())
+    q.subscribe(symlist, [SubType.Quote], is_first_push=True)
     try:
         while True:
-            res = q.option_quote([symbol])[0]
             await websocket.send_json({
-                'price': res.last_done,
-                'type': option_type,
-                'strike': res.strike_price,
-                'exp': res.expiry_date.strftime("%m/%d"),
-                'open': res.open_interest,
-                # 'volume': res.volume,
-                # 'implied_volatility': res.implied_volatility,
+                'data': chain[tk][type][eidx]
+            })
+            await asyncio.sleep(0.2)
+    except WebSocketDisconnect:
+        q.unsubscribe(symlist, [SubType.Quote])
+        print('unsubscribed option table')
+
+@app.websocket("/quote-depth")
+async def quote_depth(websocket: WebSocket):
+    await websocket.accept()
+    symbol = await websocket.receive_text()
+    q.subscribe([symbol], [SubType.Depth], is_first_push=True)
+    print(f'sub. depth for {parse_symbol(symbol)}')
+    try:
+        while True:
+            await websocket.send_json({
+                'data': depth,
                 })
             await asyncio.sleep(0.2)
     except WebSocketDisconnect:
-        pass
+        q.unsubscribe([symbol], [SubType.Depth])
+        print(f'ubsub. depth for {parse_symbol(symbol)}')
 
 @app.get('/stat/')
 def get_stat(tk):
     res = q.quote([fmt(tk)])[0]
-    prevClose = res.last_done if not is_trading_now() else res.prev_close
+    prevClose = res.last_done if not is_trading() else res.prev_close
     high = res.high - res.prev_close
     low = res.low - res.prev_close
     data = {
@@ -178,6 +210,148 @@ def get_stat(tk):
         'min': low,
     }
     return data
+
+@app.get('/dates/')
+def get_option_dates(tk: str):
+    """option date list"""
+    # use cached
+    if explist[tk]:
+        return explist[tk]
+    lst = q.option_chain_expiry_date_list(fmt(tk))
+    today = datetime.date.today()
+    lst = [[i, (i - today).days] for i in lst]  # [Date, days]
+    lst = lst[1:] if lst[0][1] < 0 else lst
+    explist[tk] = lst
+    return lst
+
+def ziplist(*lists, keys):
+    return [dict(zip(keys, values)) for values in zip(*lists)]
+
+def parse_symbol(s: str, parts=False):
+    """option symbol to readable format"""
+    s = s.removesuffix('.US')
+    tk = re.match(r"^[A-Z]{1,4}", s).group(0)
+    remain = s.removeprefix(tk)
+    date = remain[:6]  # e.g. '250411'
+    if date.startswith(year[-2:]):
+        exp = f'{date[2:4]}/{date[-2:]}'
+    else:
+        exp = f'{date[:2]}/{date[2:4]}/{date[-2:]}'
+    
+    remain = remain.removeprefix(date)
+    t = 'Put' if remain.startswith('P') else 'Call'
+
+    remain = remain[1:]
+    decimal_part = int(remain[-3:]) * 0.001
+    if decimal_part == 0.0:
+        decimal_part = 0
+    int_part = int(remain[:-3])
+    strike = int_part + decimal_part
+
+    name = f'{tk}💰{exp}💰{strike} {t}'
+    
+    if parts:
+        dates = get_option_dates(tk.lower()) # list[date, days]
+        yr = int(f'20{date[:2]}') 
+        mo = int(date[2:4])
+        day = int(date[4:])
+        date = datetime.datetime(yr, mo, day).date()
+        eidx = [i[0] for i in dates].index(date)
+        days = dates[eidx][1]
+        return {'tk':tk.lower(),
+                'type': t.lower(),
+                'eidx': eidx,
+                'T': days,
+                'strike':strike, 
+                'name':name
+                }
+    else:
+        return name
+
+@app.get('/strikes/')
+def get_strikes(tk: str, eidx: int, type: str, quote:bool=False, num:int=20, bias=10):
+    """
+    num: 2 x number of options to quote
+    bias: add # more quotes to otm options
+    """
+    if (not trading) and eidx in chain[tk][type].keys():
+        print(f'🟢 ret. cached chain for {tk} (date {eidx})')
+        return chain[tk][type][eidx]
+    res = q.option_chain_info_by_date(fmt(tk), explist[tk][eidx][0])
+    symbols = [i.put_symbol for i in res] if type == 'put' else [i.call_symbol for i in res]
+    names = [parse_symbol(s) for s in symbols]
+    strikes = [i.price for i in res]
+    out = ziplist(symbols, names, strikes, keys=['symbol', 'name', 'strike'])
+    if quote:
+        l, r = _find_near_idx(res, full_price[tk])
+        start = max(0, l-num-bias if type=='put' else l-num)
+        end = min(r+num+bias if type=='call' else r+num, len(res))
+        quotes = q.option_quote(symbols[start:end])
+        data = [{  # data/out
+            'symbol': i.symbol,
+            'name': parse_symbol(i.symbol),
+            'strike': i.strike_price,
+            'p': i.last_done,
+            'prev':i.prev_close,
+            'ch': i.last_done - i.prev_close,
+            'min': i.low,
+            'max': i.high,
+            'vol': i.volume,
+            'openInterest': i.open_interest,
+            'iv': i.implied_volatility
+        } for i in quotes]
+        
+        out[start:end] = data
+
+    chain[tk][type][eidx] = out
+    
+    ref['id'] = (tk, type, eidx)
+    ref['symidx'] = dict(zip(symbols[start:end], range(start, end)))
+    
+    return out
+
+# ---------------------
+# Option Pricing
+# ---------------------
+def N(x):
+    return stats.norm.cdf(x)
+
+def delta(s, X, T, r, sigma, typ='call'):
+    d1 = (math.log(s/X) + (r + sigma**2/2)*T) / (sigma * math.sqrt(T))
+    return N(d1) if typ == 'call' else N(d1) - 1
+
+def theta(s, X, T, r, sigma, typ='call'):
+    d1 = (math.log(s/X) + (r + sigma**2/2)*T) / (sigma * math.sqrt(T))
+    d2 = d1 - sigma * math.sqrt(T)
+    if typ == 'call':
+        theta = -s * stats.norm.pdf(d1, 0, 1) * sigma / (2 * math.sqrt(T)) - r * X * math.exp(-r * T) * N(d2)
+    elif typ == 'put':
+        theta = -s * stats.norm.pdf(d1, 0, 1) * sigma / (2 * math.sqrt(T)) + r * X * math.exp(-r * T) * N(-d2)
+    return theta / 365
+
+def vega(s, X, T, r, sigma):
+    d1 = (math.log(s/X) + (r + sigma**2/2)*T) / (sigma * math.sqrt(T))
+    return s * stats.norm.pdf(d1, 0, 1) * math.sqrt(T)
+
+def black_scholes(s, X, T, r, sigma, typ='call'):
+    d1 = (math.log(s/X) + (r + sigma**2/2)*T) / (sigma * math.sqrt(T))
+    d2 = d1 - sigma * math.sqrt(T)
+    price = s * N(d1) - X * math.exp(-r*T) * N(d2)
+    if typ == 'call':
+        return price
+    if typ == 'put':
+        price = price - s + X * math.exp(-r*T)  # put-call parity relationship
+        return price
+
+@app.get('/bs/')
+def calculate(t: str, s: float, x: float, e: int, iv: float, r: float):
+    return {
+        'price': round(black_scholes(s, x, e/365, r, iv, typ=t), 2),
+        'delta': round(delta(s, x, e/365, r, iv, typ=t), 4),
+        'theta': round(theta(s, x, e/365, r, iv, typ=t), 4),
+        'vega': round(vega(s, x, e/365, r, iv), 2),
+    }
+
 # ------------------------
 # get factors
 # ------------------------
@@ -222,7 +396,7 @@ def get_capital_flow(tk: str):
 def get_prev_closes(tk):
     res = q.candlesticks(fmt(tk), Period.Day, 12, AdjustType.ForwardAdjust)
     data = [i.close for i in res]
-    data = data[:-1] if is_trading_now() else data
+    data = data[:-1] if trading else data
     closes = [data[j] - data[j-1] for j in range(len(data)-1, 0, -1)]
     closes = [round(i, 2) for i in closes]
     return closes
@@ -254,62 +428,16 @@ def get_pre_market(tk):
     ]
     return r, supp
 
-@app.get('/iv/')
 def get_iv(tk: str):
     data = get_option_list(tk, ret='iv')
     cls = '🔴' if data['iv'] > data['hv'] else '🟢'
-    puts = [f'{round(i*100, 1)}%' for i in data['puts']]
-    calls = [f'{round(i*100, 1)}%' for i in data['calls']]
-
-    # head = [{'cls': cls, 'val': 'Put   －S－   Call'}]
-    # supp = head + [
-    #     {'cls': cls,
-    #     'val': f'{puts[i]} －{data['strikes'][i]}－ {calls[i]}' 
-    #     }
-    #     for i in range(len(puts))
-    # ]
-
     res = {   
             'cls': cls,
-            'value': f'{round(data['iv']*100, 1)}% / {round(data['hv']*100, 1)}%',
-            # 'supp': supp,
+            'value': f'{round(data['iv']*100, 1)}%',
+            'supp': [{'cls': '🔴' if cls == '🟢' else '🟢', 'val': f'HV {round(data['hv']*100, 1)}%'}],
             'timestamp': data['timestamp'],
             'title': 'IV'
          }
-    return res
-
-@app.get('/corr/')
-async def get_corr(tk: str):
-    data = {}
-    for t in tks:
-        data[t] = [i.avg_price for i in q.intraday(fmt(t))]
-        await asyncio.sleep(0.1)
-    corrs = [
-        {
-            'tk': t, 
-            'val': quotes[t][-1],
-            'corr':round(pd.Series(data[t]).corr(pd.Series(data[tk])), 2)
-         } 
-    for t in tks if t != tk
-    ]
-    # corr 1 to -1
-    corrs = sorted(corrs, key=lambda x: x['corr'], reverse=True)
-    supp = [
-        {
-        'cls':'🔴' if item['val'] <=0 else '🟢', 
-        'val':f'{item['tk']} {item['corr']}'
-        } 
-    for item in corrs[1:]
-    ]
-    
-    res = {   
-            'cls': '🔴' if corrs[0]['val'] <= 0 else '🟢', 
-            'value': f'{corrs[0]['tk']} 𝜸={corrs[0]['corr']}', 
-            'timestamp': datetime.datetime.now(eastern).strftime('%m.%d %H:%M'),
-            'supp': supp,
-            'title': 'corr'
-         }
-
     return res
 
 @app.get('/factors/')
@@ -321,107 +449,27 @@ def get_factors(tk):
     classes = ['🔴' if val < 0 else '🟢' for val in vals]
     closes = [{'cls':x, 'val':f'+{y}' if y > 0 else y} for x, y in zip(classes, vals)]
 
+    capflow = get_capital_flow(tk)
+
     data = [
-        {   
-            'cls': '⚪️', 
-            'value': 0, 
-            'title': 'cap'
-         },
-         {   
-            'cls': '⚪️', 
-            'value': 0, 
-            'supp': [],
-            'title': 'corr'
-         },
         {
             'cls': '🔴' if r < 0 else '🟢',
             'value': f'+{r}%' if r > 0 else f'{r}%',
             'supp': supp_pre,
-            'title': 'pre-market',
+            'title': 'pre',
         },
         {
             'cls': closes[0]['cls'],
             'value': closes[0]['val'],
             'supp': closes,
-            'title': 'prev.'
+            'title': 'hist.'
         },
-        # {   
-        #     'cls': '⚪️', 
-        #     'value': 'neutral', 
-        #     'title': 'iv'
-        #  },
     ]
-
-    data.append(get_iv(tk))
+    data = [capflow] + data + [get_iv(tk)]
     return data
 # ------------------------
 # place order
 # ------------------------
-class Order(BaseModel):
-    tk: str
-    option: str | None  # put | call
-    side: str  # buy | sell
-    order_type: str = 'MO'  # MO | LO
-    qty: str | int = 'min'  # min | max | mmax | #n
-    money: str = 'itm'  # itm | otm
-
-global ostack; ostack = {tk: {'put':[], 'call':[]} for tk in tks}
-positions = tr.stock_positions().channels[0].positions  # 持仓
-if positions:
-    for pos in positions:
-        # option name to tk
-        split = pos.symbol_name.lower().split(' ')
-        if split[-1] in {'call', 'put'}:  # skip possible stock holdings
-            tk, option = split[0], split[-1]
-            data = {
-                    'id': f'HIST-{pos.symbol}',
-                    'success': True,
-                    'symbol': pos.symbol, 
-                    'option': option,
-                    'status': 'filled',
-                    'side': 'buy',
-                    'tk': tk,
-                    'qty': pos.quantity,
-                    'exec_price': pos.cost_price,  # Decimal
-                    }
-            if tk in tks:
-                ostack[tk][option].append(data)
-
-@app.get('/position/')
-def get_position(tk):
-    last_put, last_call = {}, {}
-    puts = ostack[tk]['put']  # default is []
-    calls = ostack[tk]['call']
-    if puts:
-        # update last order status
-        if puts[-1]['status'] != 'filled':
-            detail = tr.order_detail(puts[-1]['id'])
-            if detail.status == OrderStatus.Filled:
-                puts[-1].update({'status':'filled', 'exec_price': detail.executed_price})
-
-            elif detail.status in [OrderStatus.Canceled, OrderStatus.Rejected]:
-                puts.pop()  # can possibly alter puts to []
-
-        # return position if bought
-        if len(puts) >= 1:
-            if puts[-1]['side'] == 'buy':
-                last_put = puts[-1]
-    if calls:
-        if calls[-1]['status'] != 'filled':
-            detail = tr.order_detail(calls[-1]['id'])
-            if detail.status == OrderStatus.Filled:
-                calls[-1].update({'status':'filled', 'exec_price': detail.executed_price})
-
-            elif detail.status in [OrderStatus.Canceled, OrderStatus.Rejected]:
-                calls.pop()
-
-        # return position if bought
-        if len(calls) >= 1:
-            if calls[-1]['side'] == 'buy':
-                last_call = calls[-1]
-
-    return {'put': last_put, 'call': last_call}
-
 def _find_near_idx(res: list[StrikePriceInfo], S):
     left, right = 0, len(res) - 1
     while left <= right:
@@ -482,110 +530,72 @@ def get_option_list(tk, typ='put', ret='price'):  # ret = 'symbol' | 'price' | '
 
         return data
 
-def find_option(tk: str, typ: str, qty='min', money='itm'):  # typ = 'call' or 'put'
-    """return target (symbol, qty) for purchasing"""
 
-    opts = get_option_list(tk=tk, typ=typ, ret='symbol')
+side = {'buy': OrderSide.Buy, 'sell': OrderSide.Sell}
 
-    if f'{typ}-{money}' in ['put-otm', 'call-itm']: opts = opts[:3]  # -1-2-3-----
-    if f'{typ}-{money}' in ['put-itm', 'call-otm']: opts = opts[3:]  # -----1-2-3-
-
-    for symbol in opts:
-        try:
-            res = tr.estimate_max_purchase_quantity(symbol=symbol, order_type=OrderType.MO, side=OrderSide.Buy)
-            cash_qty, margin_qty = res.cash_max_qty, res.margin_max_qty
-        except OpenApiException:
-            continue
-        
-        if qty == 'min' and cash_qty >= 1: qty_out = 1
-        elif type(qty) == int: qty_out = min(qty, cash_qty)
-        elif qty == 'max': qty_out = cash_qty
-        elif qty == 'mmax': qty_out = margin_qty
-        if qty_out > 0: return symbol, qty_out
-
-    return '', 0
+class Order(BaseModel):
+    id: str | None = None
+    symbol: str | None  = None
+    side: str = 'buy'
+    price: Decimal
+    qty: int
 
 @app.post("/order")
-async def place_order(order: Order):
-
-    order_type = OrderType.MO
-    submitted_price = None
-
-    if order.side == 'buy':
-        side = OrderSide.Buy
-        symbol, qty = find_option(order.tk, typ=order.option, 
-                                  qty=order.qty, money=order.money)
-        if symbol == '':
-            return {
-                'success': False, 
-                'message': 'suitable target not found.'
-            }
-        
-        if order.order_type == 'LO':
-            order_type = OrderType.LO
-            submitted_price = q.depth(symbol).bids[0].price - Decimal('0.05')
-
-    if order.side == 'sell':
-        side = OrderSide.Sell
-        last = ostack[order.tk][order.option][-1]
-        symbol, qty = last['symbol'], last['qty']
-
-        if order.order_type == 'LO':
-            order_type = OrderType.LO
-            submitted_price = q.depth(symbol).asks[0].price
-    
-    response = tr.submit_order(symbol=symbol, 
-                               order_type=order_type,
-                               side=side,
-                               submitted_quantity=qty,
+def place_order(order: Order):
+    response = tr.submit_order(symbol=order.symbol, 
+                               order_type=OrderType.LO,
+                               side=side[order.side],
+                               submitted_quantity=order.qty,
                                time_in_force=TimeInForceType.Day,
-                               submitted_price=submitted_price
-                                )   
-    
-    await asyncio.sleep(0.5)
+                               submitted_price= order.price,
+                                )
     detail = tr.order_detail(response.order_id)
-    exec_price, cost, profit = Decimal('0'), Decimal('0'), Decimal('0')
+    return {'id': response.order_id, 'status': str(detail.status)}
 
-    if detail.status == OrderStatus.Filled:
-        exec_price = detail.executed_price  # Decimal
+@app.post('/replace')
+async def replace_order(order: Order):
+    tr.replace_order(order_id=order.id, quantity=order.qty, price=order.price)
+    return 1
 
-        if order.side == 'buy':
-            base = exec_price * qty
-            cost = base * Decimal('100')
-        if order.side == 'sell':
-            base = (exec_price - ostack[order.tk][order.option][-1]['exec_price']) * qty
-            profit = base * Decimal('100')
+@app.get("/cancel")
+def cancel_order(id: str):
+    tr.cancel_order(id)
+    return 1
 
-        success = True
-        message = 'Order filled successfully.'
-    
-    else:
-        success = True
-        message = f'Order is submitted'
-    
-    status = str(detail.status).split('.')[-1].lower()
-    time = detail.submitted_at
-    data = {
-        'id': detail.order_id,
-        'success': success,
-        'message': message,
-        'status': status,
-        'name': detail.stock_name,
-        'symbol': detail.symbol,
-        'option': order.option, # call | put
-        'tk': order.tk,
-        'side': order.side,
-        'qty': detail.quantity,
-        'exec_price': exec_price,
-        'totalCost': cost,
-        'profit': profit,
-        'time': time,
-    }
+@app.get('/status/')
+def get_status(id):
+    detail = tr.order_detail(id)
+    return str(detail.status)
 
-    ostack[order.tk][order.option].append(data)
-    # all_records = ostack[order.tk]['put'] + ostack[order.tk]['call']
-    # pd.DataFrame(all_records).to_csv(f'orders/{order.tk}-{datetime.datetime.today().strftime('%m.%d')}.csv')  
-    return data
+@app.get('/positions')
+def get_positions():
+    if (not trading) and positions['val']:
+        return positions['val']
+    res = tr.stock_positions().channels[0].positions 
+    lst = [
+        {
+        'symbol': i.symbol, 
+        'cost': i.cost_price,
+        'qty': i.quantity,
+        } 
+        for i in res]
+    # parse_symbol output
+    # 'tk': tk.lower(),
+    # 'type': t.lower(),
+    # 'eidx': eidx,
+    # 'strike': strike, 
+    # 'name': name
+    parsed = [parse_symbol(i['symbol'], parts=True) for i in lst]
+    prices = q.option_quote([i['symbol'] for i in lst])
+    prices = [i.last_done for i in prices]
+    pls = [(prices[i] - lst[i]['cost']) * lst[i]['qty']*100 for i in range(len(lst))]
+
+    out = [{**d, **p, 'price': i, 'pl': j} for d, p, i, j in zip(lst, parsed, prices, pls)]
+
+    if not trading:
+        positions['val'] = out
+
+    return out
 
 
 if __name__ == '__main__':
