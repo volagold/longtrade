@@ -3,7 +3,7 @@
 ![](/dark.png)
 ![](/light.png)
 
-longtrade is an option trading system based on the [longport API](https://open.longportapp.com/en/) provided by [Longbridge Securities](https://longbridge.com).
+longtrade is an option trading application based on the [longport API](https://open.longportapp.com/en/) provided by [Longbridge Securities](https://longbridge.com).
 
 ## Features
 - simple and efficient
