@@ -1,9 +1,11 @@
 tsla
-aapl
-meta
-crwd
-net
+crwv
+apld
 app
 pltr
 hood
+crwd
+net
+aapl
+meta
 spy

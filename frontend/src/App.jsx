@@ -230,7 +230,7 @@ function App() {
     }
 
   {/* option pricing/quote/order */}
-  {board.length > 0 &&  <Pricing key={tk} tk={tk} s={board[idx].full_price}/> }
+  {board.length > 0 &&  <Pricing key={tk} tk={tk} s={board[idx].full_price} dark={dark}/> }
   
   {/* main body div end */}
   </div>
@@ -496,7 +496,7 @@ function Factors({data}){
 //   )
 // }
 
-function Pricing({tk, s}) {
+function Pricing({tk, s, dark}) {
   const [type, setType] = useState('put') // put or call
   const [bsprice, setBSprice] = useState(null) // custom s input
   const [bsT, setBST] = useState(null) // custom T inpput
@@ -769,7 +769,7 @@ function Pricing({tk, s}) {
     {/* Strike price end */}
 
     {/* II. Pricing result panel */}
-    <div className={`relative h-min w-[410px] mt-2 px-4 py-10 ml-2 border-4 rounded-xl border-primary flex flex-col gap-2 items-center bg-linear-to-t ${type=='put'? 'from-orange-300' : 'from-green-300'} from-1% to-30%`}>
+    <div className={`relative h-min w-[410px] mt-2 px-4 py-10 ml-2 border-4 rounded-xl border-primary flex flex-col gap-2 items-center bg-linear-to-t ${type=='put'? !dark? 'from-purple-300' : 'from-orange-300' : 'from-green-300'} from-1% to-30%`}>
       {/* display symbol/name */}
       <div className='absolute left-3 top-3 font-bold text-xl'>{name}</div>
       {/* put/call selection */}
@@ -785,7 +785,7 @@ function Pricing({tk, s}) {
               <div className={`absolute right-[110%] top-1/3 ml-5 badge badge-xl font-bold ${moneyness=='itm'? 'badge-success' : 'badge-primary'}`}>{moneyness}</div>
               <div className='my-5 text-5xl font-bold text-primary'>${result.price}</div>
             </div>
-            <div className='text-3xl italic w-max font-mono'>X-s = {(X - s).toFixed(2)}, T={T}d</div>
+            <div className='text-3xl italic w-max font-mono'>X-s = {(X - s).toFixed(2)}, T={bsT? bsT : T}d</div>
             <div className='text-2xl italic w-max font-mono'>𝛅 = {result.delta}</div>
             <div className='text-2xl italic w-max font-mono'>𝝷 = {result.theta}</div>
             <div className='text-2xl italic w-max font-mono'>ν = {result.vega}</div>
