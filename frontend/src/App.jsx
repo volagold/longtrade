@@ -577,7 +577,7 @@ function Pricing({tk, s}) {
 
   const calculate = async (type, s, T, X, iv, r) => {
     try{
-      const res = await axios.get(`/bs/?t=${type}&s=${s}&e=${T}&x=${X}&iv=${iv}&r=${r}`)
+      const res = await axios.get(`/pricing/?t=${type}&s=${s}&e=${T}&x=${X}&iv=${iv}&r=${r}`)
       setResult(res.data)
       setPrice(res.data.price)
     } catch {

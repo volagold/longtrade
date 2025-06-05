@@ -20,10 +20,6 @@ longtrade is an option trading system based on the [longport API](https://open.l
 5. **Frontend.** make sure [node.js](https://nodejs.org/en) is installed. `cd` to `frontend`, and install dependencies with `npm install`.
 6. **Start service.** In terminal, `cd` to this repo, run 
 ```shell
-./serve.sh
+./start.sh
 ```
-to start backend service, open a separate terminal window and run 
-```shell
-./app.sh
-```
-to start frontend service. Then go to `http://localhost:5173/` to use the application.
+to start the backend and the frontend services. Then go to `http://localhost:5173/` to use the application.

@@ -343,7 +343,7 @@ def black_scholes(s, X, T, r, sigma, typ='call'):
         price = price - s + X * math.exp(-r*T)  # put-call parity relationship
         return price
 
-@app.get('/bs/')
+@app.get('/pricing/')
 def calculate(t: str, s: float, x: float, e: int, iv: float, r: float):
     return {
         'price': round(black_scholes(s, x, e/365, r, iv, typ=t), 2),
